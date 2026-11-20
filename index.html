@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ฝนเฉลี่ยในพื้นที่</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div>
+      <h1>คำนวณปริมาณฝนเฉลี่ยในพื้นที่</h1>
+      <p class="sub">เลือกขอบเขตจังหวัด ลุ่มน้ำหลัก หรือลุ่มน้ำย่อย แล้วคำนวณฝนเฉลี่ยเชิงพื้นที่ (ย้อนหลังและพยากรณ์) บนแผนที่อากาศ Ventusky</p>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="card">
+      <div class="card-head">
+        <h2>แผนที่อากาศ</h2>
+        <div class="ctl">
+          <label for="vt-layer">ชั้นข้อมูล</label>
+          <select id="vt-layer">
+            <option value="rain-3h" selected>ฝน (3 ชม.)</option>
+            <option value="rain-1h">ฝน (1 ชม.)</option>
+            <option value="radar">เรดาร์ฝน</option>
+            <option value="temperature-2m">อุณหภูมิ (2 ม.)</option>
+            <option value="wind-10m">ลม (10 ม.)</option>
+            <option value="clouds-total">เมฆปกคลุม</option>
+            <option value="rh-2m">ความชื้นสัมพัทธ์</option>
+          </select>
+          <label for="vt-date">วันที่</label>
+          <button class="btn" type="button" id="vt-prev" aria-label="วันก่อนหน้า">◀</button>
+          <input type="date" id="vt-date">
+          <button class="btn" type="button" id="vt-next" aria-label="วันถัดไป">▶</button>
+          <button class="btn" type="button" id="vt-fit">ซูมไปพื้นที่</button>
+          <button class="btn" type="button" id="vt-lock" aria-pressed="true">ปลดล็อกแผนที่</button>
+        </div>
+      </div>
+      <div class="vt-wrap" id="vt-wrap">
+        <iframe id="vt-frame" title="แผนที่อากาศ Ventusky"></iframe>
+        <svg class="vt-boundary" id="vt-boundary" aria-hidden="true"></svg>
+        <div class="vt-shield" id="vt-shield" title="คลิกบนแผนที่เพื่อเลือก/ยกเลิกพื้นที่"></div>
+        <div class="vt-shield vt-shield-date" aria-hidden="true"></div>
+        <div class="vt-tip" id="vt-tip" hidden></div>
+      </div>
+      <div class="vt-layers" role="group" aria-label="ขอบเขตที่แสดง">
+        <label><input type="checkbox" data-ctx="province" checked><i class="sw-line province"></i>ขอบจังหวัดทั้งหมด</label>
+        <label><input type="checkbox" data-ctx="main"><i class="sw-line main"></i>ลุ่มน้ำหลักทั้งหมด</label>
+        <label><input type="checkbox" data-ctx="sub"><i class="sw-line sub"></i>ลุ่มน้ำย่อยทั้งหมด</label>
+        <label><input type="checkbox" id="show-pts" checked><i class="sw-dot"></i>จุดกริดที่ใช้คำนวณ</label>
+        <label><input type="checkbox" id="show-lbl" checked>ชื่อพื้นที่</label>
+      </div>
+      <p class="hint">คลิกบนแผนที่เพื่อเลือกพื้นที่ตามประเภทที่กรองไว้ (จังหวัด/ลุ่มน้ำหลัก/ลุ่มน้ำย่อย) · แผนที่ถูกล็อกไว้เพื่อให้เส้นขอบเขตตรงตำแหน่ง กด "ปลดล็อกแผนที่" เพื่อเลื่อน/ซูมเอง (เส้นจะซ่อนระหว่างนั้น) · ยังกด ▶ Play และเลื่อนแถบเวลาใต้แผนที่ได้</p>
+    </section>
+
+    <aside class="side">
+      <section class="card" aria-labelledby="area-title">
+        <div class="card-head" style="margin:0">
+          <h2 id="area-title">เลือกพื้นที่</h2>
+          <span class="hint" id="nl-count" style="margin:0"></span>
+        </div>
+        <div class="list-tools">
+          <div class="nl-search" id="nl-search">
+            <input type="search" id="nl-q" placeholder="ค้นหาชื่อจังหวัด / ลุ่มน้ำ / รหัส" aria-label="ค้นหาพื้นที่" autocomplete="off" spellcheck="false">
+            <span class="nl-filter" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M2 3h12l-4.6 5.4V13l-2.8 1.2V8.4z"/></svg></span>
+            <select id="nl-kind" aria-label="กรองประเภทขอบเขต" title="กรองประเภทขอบเขต">
+              <option value="province">จังหวัด</option>
+              <option value="main">ลุ่มน้ำหลัก</option>
+              <option value="sub">ลุ่มน้ำย่อย</option>
+              <option value="all">ทั้งหมด</option>
+            </select>
+          </div>
+        </div>
+        <div class="kind-tabs" id="kind-tabs" role="group" aria-label="ประเภทขอบเขต">
+          <button type="button" data-kind="province" aria-pressed="true">จังหวัด</button>
+          <button type="button" data-kind="main" aria-pressed="false">ลุ่มน้ำหลัก</button>
+          <button type="button" data-kind="sub" aria-pressed="false">ลุ่มน้ำย่อย</button>
+          <button type="button" data-kind="all" aria-pressed="false">ทั้งหมด</button>
+        </div>
+        <div class="list-box"><div class="nl" id="nl" role="listbox" aria-multiselectable="true" tabindex="-1"></div></div>
+        <div class="row"><span>พื้นที่ที่เลือก</span><button class="btn" type="button" id="sel-clear">ล้างทั้งหมด</button></div>
+        <div class="chips" id="chips"></div>
+      </section>
+    </aside>
+  </main>
+
+  <main class="grid one">
+    <section class="card" aria-labelledby="calc-title">
+      <div class="card-head">
+        <h2 id="calc-title">ปริมาณฝนเฉลี่ยเชิงพื้นที่</h2>
+        <span class="status" id="status" aria-live="polite"></span>
+      </div>
+      <div class="calc-bar" style="margin-bottom:8px">
+        <span class="grp"><label for="source">วิธีคำนวณ</label>
+          <select id="source">
+            <option value="api" selected>Open-Meteo API (ค่าตัวเลขจากแบบจำลอง · เร็ว)</option>
+            <option value="image">ภาพ Ventusky เทียบสี (แบบ ventusky_rain.py)</option>
+          </select>
+        </span>
+        <span class="grp" id="wait-grp" hidden><label for="cap-wait">รอแผนที่โหลด</label><input type="number" id="cap-wait" value="6" min="2" max="30" step="1" style="width:4.5em"> วินาที/ภาพ</span>
+      </div>
+      <div class="calc-bar">
+        <span class="grp"><label for="d-start">ตั้งแต่</label><input type="date" id="d-start"></span>
+        <span class="grp"><label for="d-end">ถึง</label><input type="date" id="d-end"></span>
+        <span class="presets" id="presets">
+          <button class="btn" type="button" data-p="-7,0">7 วันที่ผ่านมา</button>
+          <button class="btn" type="button" data-p="-30,0">30 วัน</button>
+          <button class="btn" type="button" data-p="0,7">พยากรณ์ 7 วัน</button>
+          <button class="btn" type="button" data-p="0,15">พยากรณ์ 16 วัน</button>
+          <button class="btn" type="button" data-p="-7,7">±7 วัน</button>
+        </span>
+        <span class="grp"><label for="day-mode">วันฝน</label>
+          <select id="day-mode" title="ช่วงเวลาที่นับเป็น 1 วัน (เวลาไทย)">
+            <option value="0707" selected>07:00–07:00 น. (แบบวัดฝนไทย)</option>
+            <option value="0024">00:00–24:00 น.</option>
+          </select>
+        </span>
+        <span class="grp"><label for="model">แบบจำลอง</label>
+          <select id="model">
+            <option value="best_match">อัตโนมัติ (best match)</option>
+            <option value="ecmwf_ifs025">ECMWF IFS 0.25°</option>
+            <option value="gfs_seamless">NOAA GFS</option>
+            <option value="icon_seamless">DWD ICON</option>
+            <option value="gem_seamless">GEM</option>
+            <option value="jma_seamless">JMA</option>
+          </select>
+        </span>
+        <button class="btn primary" type="button" id="calc">คำนวณฝนเฉลี่ย</button>
+        <button class="btn" type="button" id="cap-stop" hidden>หยุดจับภาพ</button>
+        <button class="btn" type="button" id="csv" disabled>ดาวน์โหลด CSV</button>
+      </div>
+
+      <div class="kpis" id="kpis"></div>
+      <div class="chart" id="chart">
+        <svg id="chart-svg" role="img" aria-label="กราฟฝนเฉลี่ยรายวัน"></svg>
+        <div class="chart-tip" id="chart-tip" hidden></div>
+      </div>
+      <div class="legend" id="chart-legend" hidden>
+        <span><i style="background:var(--rain)"></i>ฝนเฉลี่ยรายวัน (ค่าจากแบบจำลอง ช่วงที่ผ่านมา)</span>
+        <span><i style="background:color-mix(in srgb,var(--rain) 45%,transparent);border:1px dashed var(--rain)"></i>พยากรณ์ (วันฝนที่ยังไม่จบ)</span>
+        <span><i style="background:#f08c00;height:2px"></i>ฝนสะสม</span>
+        <span>คลิกแท่งกราฟเพื่อเปิดวันนั้นบนแผนที่ Ventusky</span>
+      </div>
+      <div class="table-wrap"><table id="summary"></table></div>
+      <div class="scale" id="pt-scale" hidden><span>สีจุดกริด = ฝนสะสมช่วงที่เลือก</span><span class="g" id="pt-grad"></span><span id="pt-max"></span></div>
+      <p class="hint" id="method-img" hidden><b>วิธีภาพ Ventusky</b> (เหมือน trackflood/scripts/ventusky_rain.py): หน้าเว็บจะขอสิทธิ์จับภาพ "แท็บนี้" แล้วเปิดแผนที่ชั้นฝน 3 ชม. ทีละช่วง (วันละ 8 ภาพ 07:00, 10:00 … 04:00 น.) ขยายแผนที่เต็มจอและซ่อนเส้นขอบเขตระหว่างจับภาพ จากนั้นเทียบสีแต่ละพิกเซลกับแถบสีฝนของ Ventusky (0.1–50 มม., ความทึบ 0.75) หักสีแผนที่พื้นที่ได้จากภาพที่สีจืดที่สุด กรอง median แล้วเฉลี่ยทุกพิกเซลในขอบเขต · ระหว่างจับภาพห้ามเลื่อนหน้า/สลับแท็บ/ย่อหน้าต่าง · ทำได้ครั้งละไม่เกิน 31 วัน (ราว 1 นาทีต่อวัน) · ค่าที่ได้ประมาณจากสีภาพ ฝน 3 ชม. ที่เกิน 50 มม. จะถูกนับเป็น 50</p>
+      <p class="hint" id="method-api">วิธีคำนวณ: สร้างจุดกริดสม่ำเสมอภายในขอบเขต (ระยะห่างปรับตามขนาดพื้นที่ ~0.03–0.25°) ดึงฝนรายวันจากแบบจำลองที่จุดเหล่านั้น แล้วเฉลี่ยเลขคณิต (เทียบเท่าการถ่วงน้ำหนักตามพื้นที่ เพราะแต่ละจุดแทนพื้นที่เท่ากัน) · ข้อมูลเก่ากว่า 60 วันใช้ ERA5 reanalysis · ค่าทุกช่วงเป็นผลจากแบบจำลอง ไม่ใช่ค่าวัดจากสถานี และไม่ได้แปลงจากสีภาพแผนที่</p>
+      <p class="hint">วันฝน 07–07 น.: รวมฝนรายชั่วโมงตั้งแต่ 07:00 น. วันที่ระบุ ถึง 07:00 น. วันถัดไป (ตั้งชื่อตามวันเริ่ม แบบเดียวกับ ventusky_rain.py) · วันฝน 00–24 น.: ใช้ฝนรายวันของ Open-Meteo ตามเวลาไทย</p>
+      <p class="hint">ที่มา: ฝนจาก <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a> (CC BY 4.0) · แผนที่ <a href="https://www.ventusky.com/" target="_blank" rel="noopener">Ventusky</a> · ขอบเขตลุ่มน้ำหลัก/ลุ่มน้ำย่อย สทนช. (ONWR) · ขอบเขตจังหวัด</p>
+    </section>
+  </main>
+
+  <footer>ค่าที่ได้เป็นการประมาณจากแบบจำลองเชิงตัวเลข ใช้เพื่อการติดตามเบื้องต้น ข้อมูลทางการให้ยึดตามกรมอุตุนิยมวิทยาและกรมชลประทาน</footer>
+
+  <script src="data/boundaries.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
