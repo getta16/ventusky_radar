@@ -69,9 +69,22 @@
   // จุดกริดสม่ำเสมอภายในขอบเขต ระยะห่างปรับให้ได้ราว 60 จุด (ไม่ละเอียดกว่า 0.03° ไม่หยาบกว่า 0.25°)
   function gridPoints(a) {
     if (a.pts) return a.pts;
+    const { pts, s } = lattice(a, 60, 0.03, 0.25);
+    a.spacing = s;
+    return (a.pts = pts);
+  }
+  // จุดสุ่มตัวอย่างถี่ ๆ สำหรับหาช่องกริดของแบบจำลอง GFS/best match (~300 จุด, 0.01°–0.06°: ห่างไม่เกิน 0.06° เพื่อให้ทุกช่องกริด
+  // ที่เล็กสุดราว 0.07° มีจุดตกอย่างน้อย 1 จุด)
+  function samplePoints(a) {
+    if (a.samp) return a.samp;
+    const { pts, s } = lattice(a, 300, 0.01, 0.06);
+    a.sampSpacing = s;
+    return (a.samp = pts);
+  }
+  function lattice(a, target, smin, smax) {
     const [x0, y0, x1, y1] = a.bbox;
     const aDeg = a.km2 / (111.32 * 111.32 * Math.cos((((y0 + y1) / 2) * Math.PI) / 180));
-    let s = Math.min(0.25, Math.max(0.03, Math.sqrt(aDeg / 60)));
+    let s = Math.min(smax, Math.max(smin, Math.sqrt(aDeg / target)));
     let pts = [];
     for (let tries = 0; tries < 5; tries++, s /= 2) {
       pts = [];
@@ -84,15 +97,14 @@
       if (pts.length >= 4) break;
     }
     if (!pts.length) pts = [a.label.map((v) => +v.toFixed(3))];
-    a.spacing = s;
-    return (a.pts = pts);
+    return { pts, s };
   }
 
   // ---------- สถานะ ----------
   const state = { kind: 'province', q: '', selected: [], active: null, view: null, ran: false };
   const colorOf = (id) => PALETTE[state.selected.indexOf(id) % PALETTE.length];
-  const results = new Map(); // id -> { key, dates, avg, ptTotals, total, ... }
-  const ptCache = new Map(); // "key|lat,lon" -> {date: mm}
+  const results = new Map(); // id -> { key, dates, avg, pts, ptW, ptTotals, total, ... }
+  const pointMode = () => $('pt-mode').value;
 
   // ---------- แผนที่ Ventusky ----------
   const TILE = 512; // ซูม Ventusky ใหญ่กว่า Web Mercator มาตรฐาน 1 ระดับ
@@ -200,12 +212,14 @@
         // แสดงจุดกริดเฉพาะพื้นที่ที่คำนวณฝนด้วย Open-Meteo เสร็จแล้ว (ตอนเพิ่งเลือกพื้นที่ยังไม่แสดง)
         const r = results.get(id);
         if (!r || r.method === 'image') continue;
-        const a = byId.get(id), pts = gridPoints(a);
-        const rr = pts.length > 150 ? 2.2 : 3;
+        const pts = r.pts, base = pts.length > 150 ? 2.2 : 3;
+        // จุดกริดแบบจำลอง: ขนาดจุดตามน้ำหนัก (ช่องที่อยู่ในขอบเขตเพียงบางส่วนจะเล็กกว่า)
+        const wMax = r.pm === 'model' ? Math.max(...r.ptW) : 1;
         out += pts.map(([x, y], i) => {
           const [X, Y] = toPx(x, y);
           const fill = max > 0 ? rainColor(r.ptTotals[i] / max) : 'rgba(255,255,255,.75)';
-          return `<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${rr}" fill="${fill}"/>`;
+          const rr = r.pm === 'model' ? 1.5 + 2.5 * Math.sqrt(r.ptW[i] / wMax) : base;
+          return `<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${rr.toFixed(1)}" fill="${fill}"/>`;
         }).join('');
       }
     }
@@ -388,107 +402,182 @@
       if (r.ok) return r.json();
       let reason = r.statusText;
       try { reason = (await r.json()).reason || reason; } catch {}
-      if (r.status === 429 && attempt < 2) { await new Promise((ok) => setTimeout(ok, 4000 * (attempt + 1))); continue; }
+      if (r.status === 429 && attempt < 3) {
+        setStatus(`Open-Meteo จำกัดจำนวนคำขอชั่วคราว รอ ${15 * (attempt + 1)} วินาทีแล้วลองใหม่…`);
+        await new Promise((ok) => setTimeout(ok, 15000 * (attempt + 1)));
+        continue;
+      }
       throw new Error(`Open-Meteo ${r.status}: ${reason}`);
     }
   }
-  // ดึงฝนรายวันของชุดจุด แบ่งช่วง archive (ERA5) / forecast และแบ่งคำขอ
-  // mode '0024' = ใช้ daily precipitation_sum ของ Open-Meteo (00:00–24:00 น. เวลาไทย)
-  // mode '0707' = ดึงฝนรายชั่วโมงแล้วรวมเอง 07:00 น. วัน D ถึง 07:00 น. วัน D+1 (ตั้งชื่อตามวันเริ่ม D แบบ ventusky_rain.py)
-  async function fetchPoints(points, start, end, model, mode, onProgress) {
-    const hourly = mode === '0707';
-    const want = { s: start, e: end };
-    if (hourly) end = addDays(end, 1); // ต้องใช้ชั่วโมงถึง 07:00 น. ของวันถัดจากวันสุดท้าย
+
+  // ช่วงข้อมูล: เก่ากว่า 60 วันใช้ ERA5 (ระบุ models=era5 ชัดเจน กริด 0.25°) ที่เหลือใช้แบบจำลองที่เลือก
+  const ARCHIVE_URL = 'https://archive-api.open-meteo.com/v1/archive', FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
+  function segmentsFor(s, e, model) {
     const segs = [];
-    if (start < ARCHIVE_CUTOFF) segs.push({ base: 'https://archive-api.open-meteo.com/v1/archive', s: start, e: end < ARCHIVE_CUTOFF ? end : addDays(ARCHIVE_CUTOFF, -1), model: null });
-    if (end >= ARCHIVE_CUTOFF) segs.push({ base: 'https://api.open-meteo.com/v1/forecast', s: start > ARCHIVE_CUTOFF ? start : ARCHIVE_CUTOFF, e: end, model });
-    const CH = hourly ? 50 : 100, jobs = [];
-    for (const seg of segs) for (let i = 0; i < points.length; i += CH) jobs.push({ seg, pts: points.slice(i, i + CH) });
-    const out = points.map(() => ({}));
-    const index = new Map(points.map((p, i) => [p.join(','), i]));
-    let done = 0, next = 0;
+    if (s < ARCHIVE_CUTOFF) segs.push({ base: ARCHIVE_URL, s, e: e < ARCHIVE_CUTOFF ? e : addDays(ARCHIVE_CUTOFF, -1), model: 'era5' });
+    if (e >= ARCHIVE_CUTOFF) segs.push({ base: FORECAST_URL, s: s > ARCHIVE_CUTOFF ? s : ARCHIVE_CUTOFF, e, model });
+    return segs;
+  }
+  const segName = (seg) => (seg.base === ARCHIVE_URL ? 'ERA5' : modelSel.querySelector(`option[value="${seg.model}"]`)?.textContent || seg.model);
+
+  // ส่งคำขอทีละชุด (ไม่เกิน CH จุด) พร้อมกัน 3 คำขอ คืนผลเรียงตามลำดับจุด
+  async function requestPoints(points, seg, extra, CH, onProgress) {
+    const out = new Array(points.length), jobs = [];
+    for (let i = 0; i < points.length; i += CH) jobs.push(i);
+    let next = 0, done = 0;
     async function worker() {
       while (next < jobs.length) {
-        const { seg, pts } = jobs[next++];
-        const q = new URLSearchParams({
-          latitude: pts.map((p) => p[1]).join(','), longitude: pts.map((p) => p[0]).join(','),
-          start_date: seg.s, end_date: seg.e, timezone: TZ,
-        });
-        q.set(hourly ? 'hourly' : 'daily', hourly ? 'precipitation' : 'precipitation_sum');
+        const i = jobs[next++], pts = points.slice(i, i + CH);
+        const q = new URLSearchParams({ latitude: pts.map((p) => p[1]).join(','), longitude: pts.map((p) => p[0]).join(','), timezone: TZ, ...extra });
         if (seg.model && seg.model !== 'best_match') q.set('models', seg.model);
         let data = await getJSON(`${seg.base}?${q}`);
         if (!Array.isArray(data)) data = [data];
-        data.forEach((d, k) => {
-          const o = out[index.get(pts[k].join(','))];
-          const blk = hourly ? d.hourly : d.daily, name = hourly ? 'precipitation' : 'precipitation_sum';
-          const t = blk.time, v = blk[name] || blk[Object.keys(blk).find((x) => x.startsWith(name))];
-          if (!hourly) { t.forEach((day, j) => { o[day] = v[j]; }); return; }
-          // ค่ารายชั่วโมงที่เวลา T = ฝนสะสมช่วง (T−1 ชม., T] → อยู่ในวันฝน D เมื่อ T−8 ชม. ตกในวัน D
-          const acc = o._acc || (o._acc = {});
-          t.forEach((ts, j) => {
-            const day = new Date(Date.parse(ts + ':00Z') - 8 * 3600e3).toISOString().slice(0, 10);
-            if (day < want.s || day > want.e) return;
-            const c = acc[day] || (acc[day] = { s: 0, n: 0, miss: 0 });
-            if (v[j] == null) c.miss++; else { c.s += v[j]; c.n++; }
-          });
-        });
-        onProgress(++done, jobs.length);
+        data.forEach((d, k) => { out[i + k] = d; });
+        if (onProgress) onProgress(++done, jobs.length);
       }
     }
     await Promise.all([worker(), worker(), worker()]);
-    if (hourly) for (const o of out) {
-      // วันที่ไม่ครบ 24 ชั่วโมง (เช่น เกินขอบพยากรณ์) ถือว่าไม่มีข้อมูล
-      for (const [day, c] of Object.entries(o._acc || {})) o[day] = c.n === 24 ? c.s : null;
-      delete o._acc;
-    }
     return out;
   }
 
+  // จุดกริดจริงของแบบจำลอง (GFS/best match): โปรยจุดถี่ ๆ (~300 จุด) ทั่วขอบเขต แล้วถาม Open-Meteo ว่าแต่ละจุดตกอยู่ในช่องกริดไหน
+  // (cell_selection=nearest → พิกัดที่ตอบกลับคือจุดกลางช่องกริดใกล้สุด) นับจำนวนจุดต่อช่อง = สัดส่วนพื้นที่ของช่องนั้นที่อยู่ในขอบเขต
+  // ใช้ได้กับทุกแบบจำลอง รวมถึงกริดไม่สม่ำเสมอ ผลเก็บไว้ในเบราว์เซอร์ ครั้งต่อไปไม่ต้องถามใหม่
+  // แบบจำลองที่กริดเป็นตารางสม่ำเสมอ จุดกลางช่องอยู่ที่ผลคูณของระยะกริด (ตรวจจากพิกัดที่ Open-Meteo ตอบกลับ)
+  // → คำนวณช่องกริดและน้ำหนักในเบราว์เซอร์ได้เลย ไม่ต้องส่งคำขอ ส่วน GFS (ละติจูดไม่สม่ำเสมอ) และ best match ต้องถาม Open-Meteo
+  const REGULAR_GRID = { era5: 0.25, ecmwf_ifs025: 0.25, icon_seamless: 0.125, gem_seamless: 0.15, jma_seamless: 0.5 };
+  function regularCells(a, d) {
+    const [x0, y0, x1, y1] = a.bbox;
+    const aDeg = a.km2 / (111.32 * 111.32 * Math.cos((((y0 + y1) / 2) * Math.PI) / 180));
+    const s = Math.min(d / 4, Math.max(0.004, Math.sqrt(aDeg / 20000))); // จุดตัวอย่างละเอียดอย่างน้อย 4×4 ต่อช่อง
+    const cnt = new Map(); let n = 0;
+    for (let x = x0 + s / 2; x < x1; x += s) for (let y = y0 + s / 2; y < y1; y += s) {
+      if (!inside(a, x, y)) continue;
+      const k = `${(Math.round(x / d) * d).toFixed(4)},${(Math.round(y / d) * d).toFixed(4)}`;
+      cnt.set(k, (cnt.get(k) || 0) + 1); n++;
+    }
+    if (!n) { const [x, y] = a.label; cnt.set(`${(Math.round(x / d) * d).toFixed(4)},${(Math.round(y / d) * d).toFixed(4)}`, 1); n = 1; }
+    return { cells: [...cnt].map(([k, c]) => { const [x, y] = k.split(',').map(Number); return [x, y, c / n]; }), samples: n, local: true };
+  }
+  const cellCache = new Map();
+  async function modelCells(a, seg, onProgress) {
+    if (REGULAR_GRID[seg.model]) return regularCells(a, REGULAR_GRID[seg.model]);
+    const ck = `cells|v1|${seg.base}|${seg.model}|${a.id}`;
+    if (cellCache.has(ck)) return cellCache.get(ck);
+    try { const s = localStorage.getItem(ck); if (s) { const v = JSON.parse(s); cellCache.set(ck, v); return v; } } catch {}
+    const samp = samplePoints(a);
+    const res = await requestPoints(samp, seg, { daily: 'precipitation_sum', start_date: seg.s, end_date: seg.s, cell_selection: 'nearest' }, 100, onProgress);
+    const cnt = new Map();
+    for (const d of res) { const k = `${(+d.longitude).toFixed(4)},${(+d.latitude).toFixed(4)}`; cnt.set(k, (cnt.get(k) || 0) + 1); }
+    const v = { cells: [...cnt].map(([k, n]) => { const [x, y] = k.split(',').map(Number); return [x, y, n / samp.length]; }), samples: samp.length };
+    cellCache.set(ck, v);
+    try { localStorage.setItem(ck, JSON.stringify(v)); } catch {}
+    return v;
+  }
+
+  // ฝนรายวัน/รายชั่วโมงของชุดจุด 1 ช่วงข้อมูล → [{เวลา: มม.}] (เก็บแคชตามจุด)
+  const rawCache = new Map();
+  let gridMismatch = 0; // จุดกริดที่คำนวณเองแต่ Open-Meteo ตอบพิกัดช่องอื่น (ควรเป็น 0)
+  async function fetchSeries(points, seg, hourly, cs, onProgress) {
+    const tag = `${seg.base}|${seg.model}|${seg.s}|${seg.e}|${hourly ? 'h' : 'd'}|${cs || ''}|`;
+    const need = points.filter((p) => !rawCache.has(tag + p.join(',')));
+    if (need.length) {
+      const extra = { start_date: seg.s, end_date: seg.e, [hourly ? 'hourly' : 'daily']: hourly ? 'precipitation' : 'precipitation_sum' };
+      if (cs) extra.cell_selection = cs;
+      const res = await requestPoints(need, seg, extra, hourly ? 50 : 100, onProgress);
+      res.forEach((d, i) => {
+        if (cs === 'nearest' && (Math.abs(d.latitude - need[i][1]) > 0.01 || Math.abs(d.longitude - need[i][0]) > 0.01)) gridMismatch++;
+        const blk = hourly ? d.hourly : d.daily, name = hourly ? 'precipitation' : 'precipitation_sum';
+        const v = blk[name] || blk[Object.keys(blk).find((x) => x.startsWith(name))];
+        const o = {}; blk.time.forEach((ts, j) => { o[ts] = v[j]; });
+        rawCache.set(tag + need[i].join(','), o);
+      });
+    }
+    return points.map((p) => rawCache.get(tag + p.join(',')));
+  }
+
   let calcSeq = 0;
+  // mode '0024' = daily precipitation_sum ของ Open-Meteo (00:00–24:00 น. เวลาไทย)
+  // mode '0707' = ฝนรายชั่วโมงรวมเอง 07:00 น. วัน D ถึง 07:00 น. วัน D+1 (ตั้งชื่อตามวันเริ่ม D แบบ ventusky_rain.py)
+  // pm 'uniform' = จุดสม่ำเสมอ ~60 จุด น้ำหนักเท่ากัน · 'model' = จุดกริดจริงของแบบจำลอง ถ่วงตามสัดส่วนพื้นที่ในขอบเขต
   async function calc(auto) {
-    const start = dStart.value, end = dEnd.value, model = modelSel.value, mode = dayMode();
+    const start = dStart.value, end = dEnd.value, model = modelSel.value, mode = dayMode(), pm = pointMode();
     if (!state.selected.length) { setStatus('เลือกพื้นที่อย่างน้อย 1 พื้นที่ก่อน', true); return; }
     if (!start || !end || start > end) { setStatus('ช่วงวันที่ไม่ถูกต้อง', true); return; }
     if (end > dEnd.max) { setStatus(`พยากรณ์ได้ถึงวันฝน ${thDate(dEnd.max, true)}${mode === '0707' ? ' (07–07 น. ต้องใช้ข้อมูลถึงเช้าวันถัดไป)' : ''}`, true); return; }
     if (dayDiff(start, end) > 731) { setStatus('ช่วงวันที่ยาวเกิน 2 ปี กรุณาลดช่วง', true); return; }
     state.ran = true;
-    const key = `${start}|${end}|${model}|${mode}`;
-    const ids = state.selected.slice();
-    const need = new Map();
-    for (const id of ids) for (const p of gridPoints(byId.get(id))) { const k = p.join(','); if (!ptCache.has(key + '|' + k)) need.set(k, p); }
+    const key = `${start}|${end}|${model}|${mode}|${pm}`;
+    const ids = state.selected.slice(), hourly = mode === '0707';
+    // ค่ารายชั่วโมงที่เวลา T = ฝนช่วง (T−1 ชม., T] → อยู่ในวันฝน D เมื่อ T−8 ชม. ตกในวัน D
+    const dayOf = hourly ? (ts) => new Date(Date.parse(ts + ':00Z') - 8 * 3600e3).toISOString().slice(0, 10) : (ts) => ts;
+    const inRange = (d) => d >= start && d <= end;
+    const segs = segmentsFor(start, hourly ? addDays(end, 1) : end, model);
+    const dates = []; for (let d = start; d <= end; d = addDays(d, 1)) dates.push(d);
     const seq = ++calcSeq;
+    gridMismatch = 0;
     const btn = $('calc'); btn.disabled = true;
     try {
-      if (need.size) {
-        setStatus(`กำลังดึงข้อมูลฝน ${need.size.toLocaleString('th-TH')} จุดกริด…`);
-        const pts = [...need.values()];
-        const vals = await fetchPoints(pts, start, end, model, mode, (d, n) => { if (seq === calcSeq) setStatus(`กำลังดึงข้อมูลฝน ${need.size.toLocaleString('th-TH')} จุดกริด… ${Math.round((d / n) * 100)}%`); });
-        pts.forEach((p, i) => ptCache.set(key + '|' + p.join(','), vals[i]));
+      const acc = new Map(ids.map((id) => [id, {}])); // id → {วัน: {s, n}}
+      const show = new Map(); // id → จุดที่แสดงบนแผนที่ (ช่วงข้อมูลที่ครอบคลุมหลายวันที่สุด)
+      for (const [si, seg] of segs.entries()) {
+        const part = segs.length > 1 ? ` · ช่วง ${si + 1}/${segs.length} (${segName(seg)})` : '';
+        const mem = new Map();
+        for (const id of ids) {
+          const a = byId.get(id);
+          if (pm === 'model') {
+            const prog = (d, n) => { if (seq === calcSeq) setStatus(`กำลังหาจุดกริดของแบบจำลองใน ${a.name}${part}… ${Math.round((d / n) * 100)}%`); };
+            const { cells } = await modelCells(a, seg, prog);
+            mem.set(id, { pts: cells.map((c) => [c[0], c[1]]), w: cells.map((c) => c[2]) });
+          } else {
+            const pts = gridPoints(a);
+            mem.set(id, { pts, w: pts.map(() => 1) });
+          }
+          if (seq !== calcSeq) return;
+        }
+        const uniq = new Map(); for (const m of mem.values()) for (const p of m.pts) uniq.set(p.join(','), p);
+        const pts = [...uniq.values()];
+        const label = `กำลังดึงข้อมูลฝน ${pts.length.toLocaleString('th-TH')} จุด${part}…`;
+        setStatus(label);
+        const ser = await fetchSeries(pts, seg, hourly, pm === 'model' ? 'nearest' : null, (d, n) => { if (seq === calcSeq) setStatus(`${label} ${Math.round((d / n) * 100)}%`); });
+        if (seq !== calcSeq) return;
+        const byKey = new Map(pts.map((p, i) => [p.join(','), ser[i]]));
+        for (const id of ids) {
+          const m = mem.get(id), S = m.pts.map((p) => byKey.get(p.join(','))), A = acc.get(id);
+          let nDays = new Set();
+          for (const ts of Object.keys(S[0])) {
+            const day = dayOf(ts); if (!inRange(day)) continue;
+            nDays.add(day);
+            let s = 0, w = 0;
+            S.forEach((o, i) => { const v = o[ts]; if (v != null) { s += v * m.w[i]; w += m.w[i]; } });
+            const c = A[day] || (A[day] = { s: 0, n: 0 });
+            if (w > 0) { c.s += s / w; c.n++; }
+          }
+          const totals = S.map((o) => Object.keys(o).reduce((t, ts) => (inRange(dayOf(ts)) ? t + (o[ts] || 0) : t), 0));
+          const prev = show.get(id);
+          if (!prev || nDays.size > prev.days) show.set(id, { pts: m.pts, w: m.w, totals, days: nDays.size, seg });
+        }
       }
-      if (seq !== calcSeq) return;
-      const dates = []; for (let d = start; d <= end; d = addDays(d, 1)) dates.push(d);
       for (const id of ids) {
-        const a = byId.get(id), pts = gridPoints(a);
-        const series = pts.map((p) => ptCache.get(key + '|' + p.join(',')) || {});
-        const avg = dates.map((d) => {
-          let s = 0, n = 0; for (const o of series) { const v = o[d]; if (v != null) { s += v; n++; } }
-          return n ? s / n : null;
-        });
-        const ptTotals = series.map((o) => dates.reduce((s, d) => s + (o[d] || 0), 0));
+        const a = byId.get(id), A = acc.get(id), sh = show.get(id);
+        // วันฝน 07–07 ต้องครบ 24 ชั่วโมง ไม่ครบ (เช่น เกินขอบพยากรณ์) ถือว่าไม่มีข้อมูล
+        const avg = dates.map((d) => { const c = A[d]; return c && (hourly ? c.n === 24 : c.n > 0) ? c.s : null; });
         const valid = avg.filter((v) => v != null);
         let maxI = -1; avg.forEach((v, i) => { if (v != null && (maxI < 0 || v > avg[maxI])) maxI = i; });
         const total = valid.reduce((s, v) => s + v, 0);
         results.set(id, {
-          key, model, mode, dates, avg, ptTotals, total, n: pts.length,
+          key, model, mode, pm, dates, avg, total,
+          pts: sh.pts, ptW: sh.w, ptTotals: sh.totals, ptSeg: segName(sh.seg), ptPartial: segs.length > 1, n: sh.pts.length,
           mean: valid.length ? total / valid.length : null,
           max: maxI >= 0 ? avg[maxI] : null, maxDate: maxI >= 0 ? dates[maxI] : null,
           wet: valid.filter((v) => v >= 1).length, missing: avg.length - valid.length,
-          ptMin: Math.min(...ptTotals), ptMax: Math.max(...ptTotals),
+          ptMin: Math.min(...sh.totals), ptMax: Math.max(...sh.totals),
           volume: (total / 1000) * a.km2, // ล้าน ลบ.ม. (มม./1000 × ตร.กม. × 10^6 ÷ 10^6)
         });
       }
-      const src = start < ARCHIVE_CUTOFF ? (end >= ARCHIVE_CUTOFF ? 'ERA5 + ' + modelSel.selectedOptions[0].text : 'ERA5 reanalysis') : modelSel.selectedOptions[0].text;
-      setStatus(`คำนวณแล้ว ${ids.length} พื้นที่ · ${thDate(start, true)} – ${thDate(end, true)} · วันฝน ${MODE_LABEL[mode]} · ${src}`);
+      const src = segs.map(segName).join(' + ') + (pm === 'model' ? ' · จุดกริดจริงของแบบจำลอง' : ' · จุดสม่ำเสมอ');
+      setStatus(`คำนวณแล้ว ${ids.length} พื้นที่ · ${thDate(start, true)} – ${thDate(end, true)} · วันฝน ${MODE_LABEL[mode]} · ${src}${gridMismatch ? ` · ⚠ ${gridMismatch} จุดไม่ตรงช่องกริดของแบบจำลอง` : ''}`, gridMismatch > 0);
     } catch (err) {
       if (seq === calcSeq) setStatus(`ดึงข้อมูลไม่สำเร็จ: ${err.message}`, true);
     } finally {
@@ -498,6 +587,7 @@
   }
   $('calc').addEventListener('click', () => (isApi() ? calc() : runImageCalc()));
   modelSel.addEventListener('change', () => { if (state.ran && isApi()) calc(); });
+  $('pt-mode').addEventListener('change', () => { if (state.ran && isApi()) calc(); });
   $('day-mode').addEventListener('change', () => { applyModeLimits(); if (state.ran && isApi()) calc(); });
 
   // ---------- วิธีภาพ Ventusky (แบบเดียวกับ trackflood/scripts/ventusky_rain.py) ----------
@@ -737,6 +827,7 @@
     const img = !isApi();
     modelSel.disabled = img;
     $('day-mode').disabled = img;
+    $('pt-mode').disabled = img;
     if (img) { $('day-mode').value = '0707'; applyModeLimits(); }
     $('wait-grp').hidden = !img;
     $('calc').textContent = img ? 'จับภาพและคำนวณ' : 'คำนวณฝนเฉลี่ย';
@@ -746,7 +837,7 @@
   $('source').addEventListener('change', applySource);
 
   // ---------- แสดงผล ----------
-  const currentKey = () => isApi() ? `${dStart.value}|${dEnd.value}|${modelSel.value}|${dayMode()}` : `${dStart.value}|${dEnd.value}|image|0707`;
+  const currentKey = () => isApi() ? `${dStart.value}|${dEnd.value}|${modelSel.value}|${dayMode()}|${pointMode()}` : `${dStart.value}|${dEnd.value}|image|0707`;
   function renderResults() {
     const has = state.selected.filter((id) => results.has(id));
     $('csv').disabled = !has.length;
@@ -760,7 +851,7 @@
       ['ปริมาตรน้ำฝน', `${fmt(act.volume, act.volume < 10 ? 2 : 0)}<small>ล้าน ลบ.ม.</small>`, `พื้นที่ ${fmt(a.km2, 0)} ตร.กม.`],
       act.method === 'image'
         ? ['ช่วงค่าฝนสะสมรายพิกเซล', `${fmt(act.ptMin, 0)}–${fmt(act.ptMax, 0)}<small>มม.</small>`, `ภาพ Ventusky ${act.frames3h.length} ภาพ · ${act.n.toLocaleString('th-TH')} พิกเซล (ซูม ${act.zoom})`]
-        : ['ช่วงค่าฝนสะสมรายจุด', `${fmt(act.ptMin, 0)}–${fmt(act.ptMax, 0)}<small>มม.</small>`, `จากจุดกริด ${act.n} จุด (ห่าง ~${a.spacing.toFixed(2)}°)`],
+        : ['ช่วงค่าฝนสะสมรายจุด', `${fmt(act.ptMin, 0)}–${fmt(act.ptMax, 0)}<small>มม.</small>`, act.pm === 'model' ? `จุดกริดจริงของ ${esc(act.ptSeg)} ${act.n} จุด ถ่วงตามพื้นที่${act.ptPartial ? ' (เฉพาะช่วงข้อมูลนี้)' : ''}` : `จากจุดกริด ${act.n} จุด (ห่าง ~${a.spacing.toFixed(2)}°)`],
     ].map(([l, v, n]) => `<div class="kpi" style="border-left-color:${colorOf(state.active)}"><span class="lbl">${l}</span><span class="val">${v}</span><span class="note">${n}</span></div>`).join('')
       : `<div class="kpi" style="grid-column:1/-1"><span class="lbl">${state.selected.length ? 'กด "คำนวณฝนเฉลี่ย" เพื่อดึงข้อมูลฝนของพื้นที่ที่เลือก' : 'เลือกพื้นที่จากแถบค้นหาด้านขวา หรือคลิกบนแผนที่ แล้วกด "คำนวณฝนเฉลี่ย"'}</span></div>`;
     renderChart();
@@ -771,7 +862,7 @@
         state.selected.map((id) => {
           const x = byId.get(id), r = results.get(id), stale = r && r.key !== currentKey();
           const sub = x.kind === 'sub' ? ` <span class="hint">(${esc(x.parent)})</span>` : '';
-          return `<tr data-id="${id}" class="${id === state.active ? 'active' : ''}"><td><i style="background:${colorOf(id)}"></i>${esc(x.name)}${sub}</td><td>${KIND_LABEL[x.kind]}</td><td class="num">${fmt(x.km2, 0)}</td><td class="num">${r && r.method === 'image' ? r.n.toLocaleString('th-TH') : gridPoints(x).length}</td><td>${r ? (r.method === 'image' ? 'ภาพ Ventusky' : 'Open-Meteo') + ' · ' + MODE_LABEL[r.mode] : '–'}</td>` +
+          return `<tr data-id="${id}" class="${id === state.active ? 'active' : ''}"><td><i style="background:${colorOf(id)}"></i>${esc(x.name)}${sub}</td><td>${KIND_LABEL[x.kind]}</td><td class="num">${fmt(x.km2, 0)}</td><td class="num">${r ? r.n.toLocaleString('th-TH') : pointMode() === 'model' && isApi() ? '–' : gridPoints(x).length}</td><td>${r ? (r.method === 'image' ? 'ภาพ Ventusky' : 'Open-Meteo' + (r.pm === 'model' ? ' (กริดแบบจำลอง)' : '')) + ' · ' + MODE_LABEL[r.mode] : '–'}</td>` +
             (r ? `<td class="num"><b>${fmt(r.total)}</b>${stale ? ' <span class="hint" title="ค่าจากช่วงวันที่/แบบจำลองก่อนหน้า">*</span>' : ''}</td><td class="num">${fmt(r.mean)}</td><td class="num">${fmt(r.max)}</td><td>${r.maxDate ? thDate(r.maxDate, true) : '–'}</td><td class="num">${fmt(r.volume, r.volume < 10 ? 2 : 0)}</td>`
               : '<td class="num" colspan="5" style="color:var(--muted)">ยังไม่คำนวณ</td>') + '</tr>';
         }).join('') + '</tbody>';
