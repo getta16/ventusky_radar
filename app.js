@@ -197,12 +197,14 @@
     if ($('show-pts').checked && $('source').value === 'api') {
       const max = maxPtTotal();
       for (const id of state.selected) {
+        // แสดงจุดกริดเฉพาะพื้นที่ที่คำนวณฝนด้วย Open-Meteo เสร็จแล้ว (ตอนเพิ่งเลือกพื้นที่ยังไม่แสดง)
+        const r = results.get(id);
+        if (!r || r.method === 'image') continue;
         const a = byId.get(id), pts = gridPoints(a);
-        let r = results.get(id); if (r && r.method === 'image') r = null;
         const rr = pts.length > 150 ? 2.2 : 3;
         out += pts.map(([x, y], i) => {
           const [X, Y] = toPx(x, y);
-          const fill = r && max > 0 ? rainColor(r.ptTotals[i] / max) : 'rgba(255,255,255,.75)';
+          const fill = max > 0 ? rainColor(r.ptTotals[i] / max) : 'rgba(255,255,255,.75)';
           return `<circle cx="${X.toFixed(1)}" cy="${Y.toFixed(1)}" r="${rr}" fill="${fill}"/>`;
         }).join('');
       }
