@@ -713,6 +713,11 @@
       masks.set(id, { m, n });
     }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    // เส้นขอบเขตในพิกัดกรอบแผนที่ขณะจับภาพ (ไว้วาดทับตอนบันทึกภาพ)
+    const outline = ids.map((id) => ({ d: pathOf(byId.get(id)), color: colorOf(id) }));
+    // ภาพเต็มความละเอียดของกรอบที่ตัด (เก็บเป็น PNG ไว้ให้บันทึกหลังวิเคราะห์)
+    const full = document.createElement('canvas'), fctx = full.getContext('2d');
+    const shots = []; let shotW = 0, shotH = 0;
 
     const frames = []; // { day, h, rgb: Uint8Array }
     const t0 = Date.now();
@@ -732,6 +737,10 @@
         const px = ctx.getImageData(0, 0, cw, ch).data, rgb = new Uint8Array(cw * ch * 3);
         for (let k = 0, j = 0; k < px.length; k += 4) { rgb[j++] = px[k]; rgb[j++] = px[k + 1]; rgb[j++] = px[k + 2]; }
         frames.push({ day, h, rgb });
+        if (!shotW) { shotW = Math.max(1, Math.round(cwCss * sx)); shotH = Math.max(1, Math.round(chCss * sy)); full.width = shotW; full.height = shotH; }
+        fctx.drawImage(video, (rect.left + cx) * sx, (rect.top + cy) * sy, cwCss * sx, chCss * sy, 0, 0, shotW, shotH);
+        const shot = await new Promise((ok) => full.toBlob(ok, 'image/png'));
+        if (shot) shots.push({ t, blob: shot });
         const per = (Date.now() - t0) / (i + 1), left = Math.ceil(((times.length - i - 1) * per) / 60000);
         setStatus(`จับภาพ ${i + 1}/${times.length} · ${thDate(day)} ${String((h + 7) % 24).padStart(2, '0')}:00 น. · เหลือราว ${left} นาที (ห้ามเลื่อน/สลับแท็บระหว่างนี้)`);
       }
@@ -743,6 +752,10 @@
       layerSel.value = prevLayer;
       state.view = prevView; pathCache.clear();
       setTimeout(() => { fitSelection(); reload(); }, 50);
+    }
+    if (shots.length) {
+      lastShots = { shots, w: shotW, h: shotH, sx: shotW / cwCss, sy: shotH / chCss, cx, cy, outline, start, end };
+      $('shots-grp').hidden = false;
     }
     if (frames.length < 2) { setStatus(capAbort ? 'หยุดจับภาพแล้ว (ภาพไม่พอคำนวณ)' : 'จับภาพไม่สำเร็จ', true); return; }
 
@@ -959,6 +972,69 @@
     link.href = url; link.download = `areal_rain_${dStart.value}_${dEnd.value}_${mode}.csv`;
     document.body.appendChild(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+
+  // ---------- บันทึกภาพที่จับ (ZIP แบบไม่บีบอัด: PNG บีบอัดอยู่แล้ว) ----------
+  const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  const crc32 = (u8) => { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  function zipStore(files) {
+    const enc = new TextEncoder(), now = new Date(), parts = [], central = [];
+    const dTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    const dDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    let off = 0, cdSize = 0;
+    for (const f of files) {
+      const name = enc.encode(f.name), n = f.data.length, crc = crc32(f.data);
+      const h = new DataView(new ArrayBuffer(30));
+      h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true);
+      h.setUint16(10, dTime, true); h.setUint16(12, dDate, true); h.setUint32(14, crc, true);
+      h.setUint32(18, n, true); h.setUint32(22, n, true); h.setUint16(26, name.length, true);
+      parts.push(h, name, f.data);
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true);
+      c.setUint16(12, dTime, true); c.setUint16(14, dDate, true); c.setUint32(16, crc, true);
+      c.setUint32(20, n, true); c.setUint32(24, n, true); c.setUint16(28, name.length, true); c.setUint32(42, off, true);
+      central.push(c, name);
+      off += 30 + name.length + n; cdSize += 46 + name.length;
+    }
+    const e = new DataView(new ArrayBuffer(22));
+    e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+    e.setUint32(12, cdSize, true); e.setUint32(16, off, true);
+    return new Blob([...parts, ...central, e], { type: 'application/zip' });
+  }
+  let lastShots = null; // ภาพจากการจับภาพครั้งล่าสุด
+  $('shots-save').addEventListener('click', async () => {
+    const L = lastShots; if (!L) return;
+    const withLine = $('shots-outline').checked, btn = $('shots-save');
+    btn.disabled = true;
+    try {
+      const c = document.createElement('canvas'); c.width = L.w; c.height = L.h;
+      const g = c.getContext('2d'), paths = L.outline.map((o) => ({ p: new Path2D(o.d), color: o.color }));
+      const files = [];
+      for (let i = 0; i < L.shots.length; i++) {
+        const s = L.shots[i];
+        let blob = s.blob;
+        if (withLine) { // วาดเฉพาะเส้นขอบ (stroke) ไม่เติมสีด้านใน
+          const bmp = await createImageBitmap(s.blob);
+          g.setTransform(1, 0, 0, 1, 0, 0); g.drawImage(bmp, 0, 0); bmp.close?.();
+          g.setTransform(L.sx, 0, 0, L.sy, -L.cx * L.sx, -L.cy * L.sy);
+          g.lineJoin = 'round'; g.lineCap = 'round';
+          for (const o of paths) {
+            g.strokeStyle = 'rgba(255,255,255,.9)'; g.lineWidth = 3.5; g.stroke(o.p);
+            g.strokeStyle = o.color; g.lineWidth = 1.8; g.stroke(o.p);
+          }
+          blob = await new Promise((ok) => c.toBlob(ok, 'image/png'));
+        }
+        files.push({ name: `${s.t.replace('/', '_')}Z.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+        if (i % 4 === 3) setStatus(`กำลังเตรียมภาพ ${i + 1}/${L.shots.length}…`);
+      }
+      const zip = zipStore(files), url = URL.createObjectURL(zip), link = document.createElement('a');
+      link.href = url; link.download = `ventusky_rain3h_${L.start}_${L.end}${withLine ? '_boundary' : ''}.zip`;
+      document.body.appendChild(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      setStatus(`บันทึกภาพ ${files.length} ภาพแล้ว${withLine ? ' (มีเส้นขอบเขต)' : ''} · ชื่อไฟล์เป็นเวลา UTC เหมือน ventusky_rain.py`);
+    } catch (err) {
+      setStatus('บันทึกภาพไม่สำเร็จ: ' + err.message, true);
+    } finally { btn.disabled = false; }
   });
 
   // ---------- เริ่มต้น ----------

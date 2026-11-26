@@ -115,12 +115,10 @@
           <button class="btn" type="button" data-p="-7,0">7 วันที่ผ่านมา</button>
           <button class="btn" type="button" data-p="-30,0">30 วัน</button>
           <button class="btn" type="button" data-p="0,7">พยากรณ์ 7 วัน</button>
-          <button class="btn" type="button" data-p="0,15">พยากรณ์ 16 วัน</button>
-          <button class="btn" type="button" data-p="-7,7">±7 วัน</button>
         </span>
         <span class="grp"><label for="day-mode">วันฝน</label>
           <select id="day-mode" title="ช่วงเวลาที่นับเป็น 1 วัน (เวลาไทย)">
-            <option value="0707" selected>07:00–07:00 น. (แบบวัดฝนไทย)</option>
+            <option value="0707" selected>07:00–07:00 น.</option>
             <option value="0024">00:00–24:00 น.</option>
           </select>
         </span>
@@ -137,6 +135,10 @@
         <button class="btn primary" type="button" id="calc">คำนวณฝนเฉลี่ย</button>
         <button class="btn" type="button" id="cap-stop" hidden>หยุดจับภาพ</button>
         <button class="btn" type="button" id="csv" disabled>ดาวน์โหลด CSV</button>
+        <span class="grp" id="shots-grp" hidden>
+          <label title="วาดเฉพาะเส้นขอบของพื้นที่ที่เลือกทับภาพ ด้านในไม่ระบายสี"><input type="checkbox" id="shots-outline" checked> วาดเส้นขอบเขต </label>
+          <button class="btn" type="button" id="shots-save">บันทึกภาพ (.zip)</button>
+        </span>
       </div>
 
       <div class="kpis" id="kpis"></div>
